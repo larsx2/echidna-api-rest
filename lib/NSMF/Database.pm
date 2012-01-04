@@ -1,4 +1,4 @@
-package Database;
+package NSMF::Database;
 
 use strict;
 use 5.010;

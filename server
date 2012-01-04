@@ -1,13 +1,16 @@
 #!/usr/bin/perl -w 
 
+use lib 'lib';
+
+use Mojolicious::Lite;
 use EV;
 use AnyEvent;
-use Mojolicious::Lite;
 use Data::Dumper;
 use JSON;
-use Database;
 
-app->attr( db => sub { Database->new });
+use NSMF::Database;
+
+app->attr( db => sub { NSMF::Database->new });
 
 get '/' => sub {
     my $self = shift;
