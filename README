@@ -1,0 +1,7 @@
+Echidna RESTful API:
+
+Dependencies:
+- Mojolicious
+- AnyEvent
+- EV
+- Morbo Server (Mojolicious Non-blocking server)
