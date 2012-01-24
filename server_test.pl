@@ -34,8 +34,9 @@ get '/pause' => sub {
 
     $self->render_later;   
 
-    my $rsp = $self->app->dbh->pause(3);
-    $self->render(json => $rsp);
+    my $rsp = $self->app->dbh->pause(3, sub { 
+        $self->render(json => shift @_);
+    });
 };
 
 app->start;

@@ -158,21 +158,25 @@ sub get {
 }
 
 sub pause {
-    my ($self, $interval, $dbh) = @_;
+    my ($self, $interval, $cb) = @_;
     
     say "Interval: $interval";
     my $cv; $cv = AE::cv;
+
+    my $dbh = $self->get;
+
+    $cv->cb(sub { 
+        my ($cv, $result) = @_;
+        $cb->($cv->recv);
+    });
 
     $dbh->exec("SELECT SLEEP(?)", $interval, sub {
         my ($dbh, $rows, $rv) = @_;
         $#_ or die "Failure!";
 
-        $cv->send(@$rows);
+        $cv->send($rows);
     });
 
-    my @result = $cv->recv;
-    undef $cv;
-    \@result;
 }
 
 sub sleep {
