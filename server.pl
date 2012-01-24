@@ -42,7 +42,11 @@ get '/node' => sub {
     my $self = shift;
     my $dbi = $self->app->dbh->fetch;
 
-    my $query = "SELECT id, agent_id, name, description, type, network, state, updated FROM node";
+    my $meta = {
+        src  => 'node',
+        cols => qw(id agent_id name description type network state updated),
+    };
+    my $query = "SELECT @{$meta->{cols}} FROM $meta->{src}";
     $dbi->exec($query, sub {
         my ($dbh, $rows, $rv) = @_;
     
@@ -52,8 +56,6 @@ get '/node' => sub {
             my @headers = qw(id agent_id name description type network state updated);
             for my $value (@$row) {
                 my $key = shift @headers;
-                $value = $value 
-                    if $key ~~'agent_id';
                 $response->{$key} = $value;
             }
             push @$result, $response;

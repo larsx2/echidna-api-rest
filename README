@@ -5,3 +5,8 @@ Dependencies:
 - AnyEvent
 - EV
 - Morbo Server (Mojolicious Non-blocking server)
+
+* AnyEvent
+  - EV
+  - AnyEvent::DBI
+* Mojolicious::Lite
