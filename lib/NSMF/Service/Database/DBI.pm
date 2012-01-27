@@ -18,12 +18,12 @@ sub new {
 
     unless (ref $instance eq __PACKAGE__) {
         $instance = bless {
-            __used    => {},
-            __pool    => {},
-            __free    => [],
-            __running => [],
-            __counter => 0,       
-            __total   => 0,
+            __debug   => 0,
+            __pool    => {}, # handles hash
+            __idle    => [], # handle pids idle
+            __running => {}, # handle pids running
+            __counter => 0,  #      
+            __total   => 0,  # handles created
             __window_size => 1000,
             __return_objects => 0,
         }, $class;
@@ -55,6 +55,7 @@ sub _setup {
     my $database            = $args->{database};
     $instance->{__user}     = $args->{user};    
     $instance->{__password} = $args->{password};
+    $instance->{__debug}    = $args->{debug} // 0;
 
     $instance->{__dsn} = "dbi:$driver:$database";
 
@@ -70,10 +71,10 @@ sub _setup {
 
         if (scalar @pids < 1) {
             croak "Error - Failed to create database handlers";
-            exit;
         }
 
-        $instance->{__free} = \@pids;
+        $instance->{__idle} = \@pids;
+        $instance->{__running}->{$_} = 0 for @pids;
     }
 }
 
@@ -83,142 +84,101 @@ sub pool_size {
 }
 
 my $w;
-sub fetch {
-    my ($self) = @_;
 
-    $w = AE::timer 1, 3, sub {
-        my $pids_running   = scalar @{ $self->{__running} };
-        my $pids_available = scalar @{ $self->{__free} };
-        say "pids available: " .$pids_available;
-        say "pids running:   " .$pids_running;
-        say Dumper "Free: ", $self->{__free};
+sub fire_watcher {
+    my ($self, $time) = @_;
+
+    return unless ref $self;
+
+    unless (defined $time ~~ /\A\d+\Z/) {
+        warn "Expected integer value on " .__PACKAGE__. '->fire_watcher';
+        return;
+    }
+
+    $w = AE::timer 1, $time, sub {
+        say Dumper "Free: ", $self->{__idle};
         say Dumper "Running: ", $self->{__running};
-
     };
+}
 
-    my @pids_available = @{ $self->{__free} };
-    say "[DEBUG] - Before fetch we have " .scalar @pids_available. " handlers.";
+sub fetch {
+    my $self = shift;
+    
+    $self->fire_watcher(3) if $self->{__debug};
 
-    my $random_idx = int rand @pids_available;
-    my $random_pid = $pids_available[$random_idx];
+    say scalar(sort @{ $self->{__idle} }). " handlers available"
+        if $self->{__debug};
 
-    my $fetch_running = 0;
-    unless ($random_pid and $random_pid ~~ @{ $self->{__free} }) {
-        say "ALERT: Pid not found in free pool";
-
-        croak "Error - Failed to create handlers" if scalar keys %{ $self->{__pool} } < 1;
-        say "Refetching........................";
-        $fetch_running = 1;
-    }
-
+    # pool is empty
     my $dbh;
-    if ($fetch_running) {
-        say "Fetching used pid";
-        if ($self->{__counter} == $self->{__total} - 1) {
-            $self->{__counter} = 0;
-        } else {
-            $self->{__counter} += 1;
-        }   
-
-        my $used_idx = $self->{__running}->[$self->{__counter}];
-        $dbh = $self->{__pool}->{$used_idx};
-        say Dumper "Running: ", $self->{__running};
-        say "Used PID: " .$dbh->{child_pid};
+    if (scalar @{ $self->{__idle} } < 1) {
+        my $pid = $self->_reuse_pid;
+        $dbh  = $self->{__pool}->{$pid};
+        $self->{__running}->{$pid} += 1;
     } else {
-        $dbh = $self->{__pool}->{$random_pid};
+        my $pid = shift @{ $self->{__idle} };
+        $dbh    = $self->{__pool}->{$pid};
+        $self->{__running}->{$pid} += 1;
     }
-    push @{ $self->{__running} }, $dbh->{child_pid};
-    splice(@{ $self->{__free} }, $random_idx, 1);
 
-    say "Fetched: " .ref $dbh;
+    unless (ref $dbh eq 'AnyEvent::DBI') {
+        if ($self->{__debug}) {
+            say "Counter: " .$self->{__counter};
+            say Dumper "Idle: ", $self->{__idle};
+            say Dumper "Running: ", keys %{ $self->{__running} };
+        }
+        die "HandleFetchError - Could not fetch valid handler";
+    }
+
+    if ($self->{__debug}) {
+        say "Selected PID: " .$dbh->{child_pid};
+        say "Fetched:      " .ref $dbh;
+        my @pids_current = @{ $self->{__idle} };
+        say "Now " .scalar @pids_current. " handlers available";
+        say;
+    }
 
     return $dbh;
 }
 
-sub get {
-    my $self = shift;
+sub _reuse_pid {
+    my ($self) = @_;
     
-    my @pids_pool = sort @{ $self->{__free} };
-    say scalar @pids_pool. " handlers available";
+    my @pids = sort keys %{ $self->{__running} };
+    $self->{__counter} %= $self->{__total};
+    my $pid = $pids[$self->{__counter}];
+    $self->{__counter} += 1;
 
-    if ($self->{__counter} == $self->{__total} - 1) {
-        $self->{__counter} = 0;
-    } else {
-        $self->{__counter} += 1;
-    }   
+    say "Reusing pid $pid" if $self->{__debug};
 
-    my $idx = $pids_pool[$self->{__counter}];
-    my $dbh = $self->{__pool}->{$idx};
-
-    say "Selected PID: " .$dbh->{child_pid};
-    say "Fetched:      " .ref $dbh;
-    say;
-
-    return $dbh;
+    return $pid;
 }
 
 sub pause {
     my ($self, $interval, $cb) = @_;
     
-    say "Interval: $interval";
-    my $cv; $cv = AE::cv;
+    die "TypeError - Expected integer value" 
+        unless defined $interval ~~ /\d+/;
 
-    my $dbh = $self->get;
-
-    $cv->cb(sub { 
-        my ($cv, $result) = @_;
-        $cb->($cv->recv);
-    });
-
-    $dbh->exec("SELECT SLEEP(?)", $interval, sub {
-        my ($dbh, $rows, $rv) = @_;
-        $#_ or die "Failure!";
-
-        $cv->send($rows);
-    });
-
+    $self->_exec_query("SELECT SLEEP($interval)", $cb);
 }
 
-sub sleep {
-    my ($self, $interval, $cb) = @_;
+sub _exec_query {
+    my ($self, $sql, $cb) = @_;
 
-    $interval //= 10;
     my $dbh = $self->fetch;
+    $dbh->exec($sql, sub {
+        my ($dbh, $rows, $rv) = @_;
+        $#_ or die "Internal Failure $@";
 
-    my $w;
-    if (ref $dbh eq 'AnyEvent::DBI') {
-        undef $w;
-        $dbh->exec("SELECT SLEEP(?)", $interval, sub { 
-            my ($dbi, $rows, $rv) = @_;
+        $self->return_handle($dbh) 
+            or die "Failed to return handler $@";
 
-            my $pid = $dbi->{child_pid};
-            push @{ $self->{__free} }, $pid
-                unless $pid ~~ @{ $self->{__free} };
+        say "Returning $dbh->{child_pid} to the pool"
+            if $self->{__debug};
 
-            my $idx = 0;
-            for my $el (@{ $self->{__running} }) {
-                last if $el ~~ qr/\A$pid\Z/;
-                $idx += 1;
-            }
-
-            splice(@{ $self->{__running} }, $idx, 1);
-
-            my $pids_running   = scalar @{ $self->{__running} };
-            my $pids_available = scalar @{ $self->{__free} };
-            #say "pids available: " .$pids_available;
-            #say "pids running:   " .$pids_running;
-        
-            $cb->(@$rows);
-        });
-
-    } else {
-        say "--------- DIDNT FOUND HANDLER ---------";
-        $w = AE::timer 1, 1, sub {
-            say "[SLEEP] Trying.. ";
-
-            $self->sleep($interval, $cb);
-        };
-    }
+        $cb->(@$rows);
+    });
 }
 
 sub build_query {
@@ -237,29 +197,55 @@ sub search {
     my $model = $self->_require_model($model_type);
     my $sql   = $self->_mk_query_select($model, $criteria);
 
+    my $cb_switch = 0;
+    $cb_switch = 1 if ref $cb eq 'CODE';
+
+    my $cv = AE::cv;
+    if (ref $cb eq 'CODE') {
+        $cv->cb(sub {
+            my $cv = shift;
+            $cb->($cv->recv);
+        });
+    }
+
     $dbi->exec($sql, sub {
         my ($dbh, $rows, $rv) = @_;
         $#_ or die "Internal Failure $@";
 
-        my $pid = $dbh->{child_pid};
-        push @{ $self->{__free} }, $pid
-                unless $pid ~~ @{ $self->{__free} };
-
-        my $idx = 0;
-        for my $el (@{ $self->{__running} }) {
-            last if $el ~~ qr/\A$pid\Z/;
-            $idx += 1;
-        }
-
-        splice(@{ $self->{__running} }, $idx, 1);
+        $self->return_handle($dbh) 
+            or die "Failed to return handler $@";
 
         my @result;
         for my $row (@$rows) {
             push @result, $self->_map_properties($model, $row);
         }
  
-        $cb->(@result);
+        $cv->send(\@result);
     });
+
+    $cv;
+}
+
+sub return_handle {
+    my ($self, $dbh) = @_;
+
+    croak q{Error - Failed to close db handle}
+        unless ref $dbh eq 'AnyEvent::DBI';
+
+    my $pid = $dbh->{child_pid};
+
+    my $idx = 0;
+    for my $pid_running (sort keys %{ $self->{__running} }) {
+        last if $pid_running ~~ qr/\A$pid\Z/;
+        $idx += 1;
+    }
+
+    $self->{__running}->{$pid} -= 1;
+    if ($self->{__running}->{$pid} == 0) {
+        push @{ $self->{__idle} }, $pid;
+    }
+    
+    1;
 }
 
 sub window_size {
@@ -351,19 +337,6 @@ sub _mk_query_insert {
     # Accept Objects only
     # Check for required fields and values
     # insert only no updates
-}
-
-sub _do_query {
-    my ($self, $dbi, $sql) = @_;
-
-    say "SQL: " .$sql;
-    my $cv  = AE::cv;
-    $dbi->exec($sql, sub {
-        my ($dbh, $rows, $rv) = @_;
-        $#_ or croak "Internal Failure $@";
-        $cv->send($rows);
-    });
-    die Dumper $cv->recv;
 }
 
 sub _map_properties {

@@ -11,9 +11,11 @@ use Module::Pluggable
 sub new {
     my ($class, $handler, $settings) = @_;
     
+    my $driver_package = __PACKAGE__ .'::'. uc $handler;
+    say $driver_package;
     croak "Database driver not supported" 
-        unless $handler ~~ ['dbi', 'cassandra', 'mongodb'];
-    #     unless $handler ~~ __PACKAGE__drivers;
+        unless /$driver_package/i ~~ [__PACKAGE__->drivers];
+        #unless $handler ~~ ['dbi', 'cassandra', 'mongodb'];
 
     my $driver_path = "NSMF::Service::Database::" .uc($handler);
     eval qq{require $driver_path}; if ($@) {

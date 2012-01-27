@@ -19,20 +19,43 @@ my $settings = {
 };
 
 my $db = NSMF::Service::Database->new(dbi => $settings);
-isa_ok( $db->fetch, 'AnyEvent::DBI');
+my $dbh = $db->fetch;
+isa_ok( $dbh, 'AnyEvent::DBI');
+$db->return_handle($dbh);
 
-my $counter = 0;
-my $w = AE::timer 1,1,sub { say "Latency: $counter"; $counter += 1 };
-#my $session = $db->search(session => { net_dst_port => 22, net_src_flags => 24 });
-#say Dumper ($session->[0]);
-#say "Got " .@$session. " sessions";
+sub profiler {
+    my ($cb) = @_;
+
+    my $start_time = AE::now;
+    $cb->();
+    my $latency = AE::now - $start_time;
+    say "This call took  " .$latency. " seconds to return a response.";
+}
+
+profiler(sub {
+    my $session = $db->search(session => { net_dst_port => 22 })->recv;
+    say "Got " .scalar @$session. " sessions";
+});
+
+profiler sub {
+    my $cv = AE::cv;
+    $db->search(session => { net_dst_port => 22 }, sub {
+        my $sessions = shift;
+        $cv->send(scalar @$sessions);
+    });
+    say "Got " .$cv->recv. " sessions";
+};
+
+exit;
 
 my $events = $db->search(
     event => { 
         id => 1,
     });
 
-say Dumper ($events->[0]);
+say Dumper $events;
+exit;
+#say Dumper ($events->[0]);
 say "Got " .@$events. " events";
 
 
