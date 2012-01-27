@@ -5,14 +5,14 @@ use 5.010;
 
 __PACKAGE__->properties({
     id          => ['int'],
-    agent_id    => ['int'],
     name        => ['text'],
-    password    => ['text'],
     type        => ['text'],
-    description => 'text',
+    agent_id    => ['int'],
+    password    => ['text'],
     network     => ['text'],
     state       => ['text'],
     updated     => ['text'],
+    description => 'text',
 });
 
 1;

@@ -160,25 +160,45 @@ sub pause {
     die "TypeError - Expected integer value" 
         unless defined $interval ~~ /\d+/;
 
-    $self->_exec_query("SELECT SLEEP($interval)", $cb);
+    $self->_exec_query("SELECT SLEEP($interval)", undef, $cb);
 }
 
 sub _exec_query {
-    my ($self, $sql, $cb) = @_;
+    my ($self, $sql, $model, $cb) = @_;
 
-    my $dbh = $self->fetch;
-    $dbh->exec($sql, sub {
+    my $dbi   = $self->fetch;
+    my $cb_switch = 0;
+    $cb_switch = 1 if ref $cb eq 'CODE';
+
+    my $cv = AE::cv;
+    if (ref $cb eq 'CODE') {
+        $cv->cb(sub {
+            my $cv = shift;
+            $cb->($cv->recv);
+        });
+    }
+
+    say "SQL: $sql" if $self->{__debug};
+    $dbi->exec($sql, sub {
         my ($dbh, $rows, $rv) = @_;
         $#_ or die "Internal Failure $@";
 
         $self->return_handle($dbh) 
             or die "Failed to return handler $@";
 
-        say "Returning $dbh->{child_pid} to the pool"
-            if $self->{__debug};
-
-        $cb->(@$rows);
+        if (defined $model) {
+            my @result;
+            for my $row (@$rows) {
+                push @result, $self->_map_properties($model, $row);
+            }
+     
+            $cv->send(\@result);
+        } else {
+            $cv->send("Success");
+        }
     });
+
+    $cv;
 }
 
 sub build_query {
@@ -193,37 +213,10 @@ sub build_query {
 sub search {
     my ($self, $model_type, $criteria, $cb) = @_;
 
-    my $dbi   = $self->fetch;
     my $model = $self->_require_model($model_type);
     my $sql   = $self->_mk_query_select($model, $criteria);
 
-    my $cb_switch = 0;
-    $cb_switch = 1 if ref $cb eq 'CODE';
-
-    my $cv = AE::cv;
-    if (ref $cb eq 'CODE') {
-        $cv->cb(sub {
-            my $cv = shift;
-            $cb->($cv->recv);
-        });
-    }
-
-    $dbi->exec($sql, sub {
-        my ($dbh, $rows, $rv) = @_;
-        $#_ or die "Internal Failure $@";
-
-        $self->return_handle($dbh) 
-            or die "Failed to return handler $@";
-
-        my @result;
-        for my $row (@$rows) {
-            push @result, $self->_map_properties($model, $row);
-        }
- 
-        $cv->send(\@result);
-    });
-
-    $cv;
+    $self->_exec_query($sql, $model, $cb);
 }
 
 sub return_handle {
@@ -334,9 +327,11 @@ sub _mk_query_count {
 sub _mk_query_insert {
     my ($self, $object) = @_;
 
-    # Accept Objects only
-    # Check for required fields and values
-    # insert only no updates
+    my @fields = sort keys %{ $object->metadata };
+    my @values = map { "'".$object->get($_)."'" } @fields;
+    my $model = ref $object;
+    my $table = lc $1 if $model =~ /::(\w+)$/;
+    my $sql = "INSERT INTO " .lc $table. "(".join(", ", @fields). ") VALUES(" .join(", ", @values). ")";
 }
 
 sub _map_properties {
@@ -373,14 +368,17 @@ sub __validate_object {
 }
 
 sub insert {
-    my ($self, $model_type, $data) = @_;
+    my ($self, $model_type, $data, $cb) = @_;
 
     my $model = $self->_require_model($model_type);
     eval {
         $self->__validate_object($model, $data);
     }; if ($@) {
-        warn "DbInsertFailed - " .$@->{message};
+        warn "DatabaseInsertFailed - " .$@->{message};
     }
+
+    my $sql = $self->_mk_query_insert($data);
+    $self->_exec_query($sql, undef, $cb);
 }
 
 sub update {

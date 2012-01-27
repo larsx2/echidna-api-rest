@@ -58,8 +58,8 @@ sub validate_type {
 
     given($type) {
         when(/ip/) {  
-            croak { message => "IP type expected on '$key' accessor" }
-                unless $value ~~ /\A\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z/;
+            #croak { message => "IP type expected on '$key' accessor" }
+            #    unless $value ~~ /\A\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z/;
         }
         when(/int/) { 
             croak { message => "Integer type expected on '$key' accessor" }
