@@ -1,4 +1,4 @@
-package NSMF::Server::Web::Main;
+package NSMF::Web::Controller::Main;
 use Mojo::Base 'Mojolicious::Controller';
 
 sub index {

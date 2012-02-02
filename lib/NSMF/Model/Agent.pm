@@ -3,14 +3,16 @@ package NSMF::Model::Agent;
 use strict;
 use 5.010;
 
-__PACKAGE__->properties({
+use base qw(NSMF::Model::Object);
+
+__PACKAGE__->set_properties({
     id            => ['int'],
     name          => ['text'],
     password      => ['text'],
-    description   => 'text',
-    ip            => ['decimal'],
     state         => ['text'],
     updated       => ['text'],
+    ip            => ['decimal'],
+    description   => 'text',
 });
 
 1;

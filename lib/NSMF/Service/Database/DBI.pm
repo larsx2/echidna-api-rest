@@ -11,6 +11,12 @@ use Carp;
 
 use Data::Dumper;
 use NSMF::Model;
+use NSMF::Common::Util;
+use NSMF::Common::Error;
+
+use constant {
+    ModelNotFound => 'Failed to load module',
+};
 
 my $instance;
 sub new {
@@ -26,9 +32,11 @@ sub new {
             __total   => 0,  # handles created
             __window_size => 1000,
             __return_objects => 0,
+            __loaded_models => [],
         }, $class;
 
         $instance->_setup($args);
+    
     }
 
     $instance;
@@ -63,19 +71,26 @@ sub _setup {
         my $dbi = new AnyEvent::DBI 
                       $instance->{__dsn}, 
                       $instance->{__user}, 
-                      $instance->{__password};
+                      $instance->{__password},
+                      PrintError => 0,
+                      on_error => sub {
+                          say "DBI Error: $@ at $_[1]:$_[2]";
+                      };
 
         $instance->{__pool}->{$dbi->{child_pid}} = $dbi;
 
-        my @pids = keys %{ $instance->{__pool} };
-
-        if (scalar @pids < 1) {
-            croak "Error - Failed to create database handlers";
-        }
-
-        $instance->{__idle} = \@pids;
-        $instance->{__running}->{$_} = 0 for @pids;
     }
+
+    my @pids = keys %{ $instance->{__pool} };
+
+    if (scalar @pids < 1) {
+        croak "Error - Failed to create database handlers";
+    }
+
+    $instance->{__idle} = \@pids;
+    $instance->{__running}->{$_} = 0 for @pids;
+
+    $instance->_autoload_models();
 }
 
 sub pool_size {
@@ -84,7 +99,6 @@ sub pool_size {
 }
 
 my $w;
-
 sub fire_watcher {
     my ($self, $time) = @_;
 
@@ -96,19 +110,18 @@ sub fire_watcher {
     }
 
     $w = AE::timer 1, $time, sub {
-        say Dumper "Free: ", $self->{__idle};
-        say Dumper "Running: ", $self->{__running};
+       say  "Running: $self->{__running} " .(keys %{$self->{__running}}). " (".join(", ", (keys %{$self->{__running}})). ")";
     };
 }
 
 sub fetch {
     my $self = shift;
-    
-    $self->fire_watcher(3) if $self->{__debug};
 
-    say scalar(sort @{ $self->{__idle} }). " handlers available"
-        if $self->{__debug};
-
+    if ($self->{__debug}) {
+        say  "Running: $self->{__running} " .(keys %{$self->{__running}})
+           . " (".join(", ", (keys %{$self->{__running}})). ")";
+    }
+            
     # pool is empty
     my $dbh;
     if (scalar @{ $self->{__idle} } < 1) {
@@ -154,9 +167,9 @@ sub _reuse_pid {
     return $pid;
 }
 
-sub pause {
+sub sleep {
     my ($self, $interval, $cb) = @_;
-    
+
     die "TypeError - Expected integer value" 
         unless defined $interval ~~ /\d+/;
 
@@ -166,9 +179,7 @@ sub pause {
 sub _exec_query {
     my ($self, $sql, $model, $cb) = @_;
 
-    my $dbi   = $self->fetch;
-    my $cb_switch = 0;
-    $cb_switch = 1 if ref $cb eq 'CODE';
+    my $dbh = $self->fetch;
 
     my $cv = AE::cv;
     if (ref $cb eq 'CODE') {
@@ -178,8 +189,9 @@ sub _exec_query {
         });
     }
 
+    say Dumper $self->{__running} if $self->{__debug};
     say "SQL: $sql" if $self->{__debug};
-    $dbi->exec($sql, sub {
+    $dbh->exec($sql, sub {
         my ($dbh, $rows, $rv) = @_;
         $#_ or die "Internal Failure $@";
 
@@ -194,7 +206,7 @@ sub _exec_query {
      
             $cv->send(\@result);
         } else {
-            $cv->send("Success");
+            $cv->send(@$rows);
         }
     });
 
@@ -204,7 +216,7 @@ sub _exec_query {
 sub build_query {
     my ($self, $model_type, $criteria, $cb) = @_;
 
-    my $model = $self->_require_model($model_type);
+    my $model = $self->_load_model($model_type);
     my $sql   = $self->_mk_query_select($model, $criteria);
 
     return $sql;
@@ -213,16 +225,38 @@ sub build_query {
 sub search {
     my ($self, $model_type, $criteria, $cb) = @_;
 
-    my $model = $self->_require_model($model_type);
+    my $model = $self->_load_model($model_type);
+
+    $self->_validate_criteria($model, $criteria);
+
     my $sql   = $self->_mk_query_select($model, $criteria);
 
     $self->_exec_query($sql, $model, $cb);
 }
 
+sub count {
+    my ($self, $model_type, $cb) = @_;
+
+    croak "ModelNotFound - The model requested does not exist" 
+        unless 'NSMF::Model::' .ucfirst($model_type) ~~ [NSMF::Model->objects];
+
+    $self->_exec_query("SELECT COUNT(*) FROM $model_type", undef, $cb);
+}
+
+sub map_objects {
+    my ($self, $enable) = @_;
+
+    if ($enable) {
+        $self->{__return_objects} = 1;
+    } else {
+        $self->{__return_objects} = 0;
+    }
+}
+
 sub return_handle {
     my ($self, $dbh) = @_;
 
-    croak q{Error - Failed to close db handle}
+    croak 'Error - Failed to close db handle'
         unless ref $dbh eq 'AnyEvent::DBI';
 
     my $pid = $dbh->{child_pid};
@@ -235,7 +269,7 @@ sub return_handle {
 
     $self->{__running}->{$pid} -= 1;
     if ($self->{__running}->{$pid} == 0) {
-        push @{ $self->{__idle} }, $pid;
+        push @{ $self->{__idle} }, $pid."";
     }
     
     1;
@@ -255,112 +289,167 @@ sub search_iter {
     my ($self, $model_type, $criteria) = @_;
 
     my $dbi   = $self->fetch;
-    my $model = $self->_require_model($model_type);
-    my $sql   = $self->_mk_query($model, $criteria);
+    my $model = $self->_load_model($model_type);
 
-    my $page  = $self->window_size // 1000;
-    my $rsp   = $self->_do_query($dbi, $sql . " LIMIT 0, ".$self->window_size);
+    $self->_validate_criteria($model, $criteria);
 
-    my @result;
-    for my $row (@$rsp) {
-        push @result, $self->_map_properties($model, $row);
-    }
+    my $sql   = $self->_mk_query_select($model, $criteria);
+
+    my $limit_query = $sql. " LIMIT 0, " .$self->window_size;
+    my $result = $self->_exec_query($limit_query, $model, undef)->recv;
     
     my $idx    = 0; # array index
     my $offset = 0; # limit offset 
     return sub {
-        if ($idx == $page) {
-            say "DB Call";
-            $offset += $page;
-            my $limit = $sql. " LIMIT " .$offset. ", " .$page;
-            my $rsp   = $self->_do_query($dbi, $limit);
+        if ($idx == $self->window_size) {
+            $offset += $self->window_size;
 
-            splice @result;
-            for my $row (@$rsp) {
-                push @result, $self->_map_properties($model, $row);
-            }
+            $limit_query = $sql. " LIMIT " .$offset. ", " .$self->window_size;
+
+            splice @$result;
+            $result = $self->_exec_query($limit_query, $model, undef)->recv;
 
             $idx = 0;
-            my $session = $result[$idx];
+            my $object = $result->[$idx];
             $idx += 1;  # this can be omitted using $result[$idx++]
 
-            return $session;
+            return $object;
         } else {
-            my $session = $result[$idx];
+            my $object = $result->[$idx];
             $idx += 1;
 
-            return $session;
+            return $object;
         }
     };
 }
 
+sub _autoload_models {
+    my ($self) = @_;
+
+    for my $model_path (NSMF::Model->objects) {
+        $self->_require_model($model_path);
+    }
+}
+
 sub _require_model {
-    my ($self, $model) = @_;
-
-    croak "Invalid search model"
-        unless 'NSMF::Model::' .ucfirst($model) ~~ [NSMF::Model->objects];
-
-    my $model_path = 'NSMF::Model::' .ucfirst($model);
+    my ($self, $model_path) = @_;
 
     eval qq{require $model_path}; if ($@) {
-        croak "Failed to load $model_path " .$@;
+        throw 'ModelNotFound', $@;
+    }
+
+    push @{ $self->{__loaded_models} }, $model_path;
+}
+
+sub _load_model {
+    my ($self, $model) = @_;
+
+    my $model_path = 'NSMF::Model::' .ucfirst($model);
+    unless ($model_path ~~ $self->{__loaded_models}) {
+        eval qq{require $model_path}; if ($@) {
+            throw "Failed to load $model_path [$@]";
+        }
     }
 
     return $model_path;
+}
+
+sub _clean_criteria {
+    my ($model, $criteria) = @_;
+
+    for my $key (keys %$criteria) {
+        delete $criteria->{$key} unless $key ~~ $model->attributes;
+    }
+
+    return $criteria;
 }
 
 sub _mk_query_select {
     my ($self, $model, $criteria) = @_;
     
     my $table = lc $1 if $model =~ /::(\w+)$/;
-    my $query = "SELECT " .join(", ", @{ $model->properties })
-              . " FROM " .$table. " " .$self->create_filter($criteria);
+
+    $criteria = _clean_criteria($model, $criteria);
+
+    return "SELECT " .join(", ", @{ $model->attributes })
+          ." FROM " .$table. " " .$self->create_filter($criteria);
 }
 
 sub _mk_query_count {
     my ($self, $model, $criteria) = @_;
     
     my $table = lc $1 if $model =~ /::(\w+)$/;
-    my $query = "SELECT COUNT(*) FROM " .$table. " " .$self->create_filter($criteria);
+    $criteria = _clean_criteria($model, $criteria);
+
+    return "SELECT COUNT(*) FROM " .$table. " " .$self->create_filter($criteria);
 }
 
 sub _mk_query_insert {
     my ($self, $object) = @_;
 
-    my @fields = sort keys %{ $object->metadata };
+    my @fields = sort keys %{ $object->properties };
     my @values = map { "'".$object->get($_)."'" } @fields;
     my $model = ref $object;
     my $table = lc $1 if $model =~ /::(\w+)$/;
-    my $sql = "INSERT INTO " .lc $table. "(".join(", ", @fields). ") VALUES(" .join(", ", @values). ")";
+    
+    return "INSERT INTO " .lc $table. "(".join(", ", @fields). ") VALUES(" .join(", ", @values). ")";
+}
+
+sub _mk_query_update {
+    my ($self, $model, $criteria, $data) = @_;
+
+    my $table = lc $1 if $model =~ /::(\w+)$/;
+    my $data  = _clean_criteria($model, $data);
+    $criteria = _clean_criteria($model, $criteria);
+    
+    my $query = "UPDATE $table SET ";
+
+    my @pairs;
+    for my $key (keys %{ $data }) {
+        push @pairs, "$key = '$data->{$key}'";
+    }
+
+    $query .= join(", ", @pairs);
+    $query .= " " .$self->create_filter($criteria);
 }
 
 sub _map_properties {
     my ($self, $model, $row) = @_;
 
     my $hash = {};
-    for my $key (@{ $model->properties }) {
-        $hash->{$key} = shift @$row;
-    }
+    $hash->{$_} = shift @$row for (@{ $model->attributes });
 
-    if ($self->{__return_object} == 1) {
-        return $model->new($hash);
-    }
-    else {
-        return $hash;
+    return $model->new($hash) if $self->{__return_objects};
+
+    $hash
+}
+
+sub _validate_criteria {
+    my ($self, $model, $criteria) = @_;
+
+    eval {
+        $model->validate($criteria);
+    }; if ($@) {
+        throw $@->message;
     }
 }
 
-sub __validate_object {
+sub _validate_object {
     my ($self, $model, $object) = @_;
 
     my @required = grep {
-        $_ if ref $model->metadata->{$_} eq 'ARRAY'
-    } @{ $model->properties };
+        $_ if ref $model->properties->{$_} eq 'ARRAY'
+    } @{ $model->attributes };
 
-    for my $key (keys %{ $model->metadata }) {
+    for my $key (keys %{ $model->properties }) {
         if ($key ~~ @required) {
-            my $type  = shift @{ $model->metadata->{$key} };
-            my $value = $object->{$key};
+            my $type  = shift @{ $model->properties->{$key} };
+            my $value;
+            if (ref $object eq $model) {
+                $value = $object->get($key);
+            } else {
+                $value = $object->{$key};
+            }
 
             $model->validate_type($type, $key, $value); 
         }
@@ -370,11 +459,12 @@ sub __validate_object {
 sub insert {
     my ($self, $model_type, $data, $cb) = @_;
 
-    my $model = $self->_require_model($model_type);
+    my $model = $self->_load_model($model_type);
+
     eval {
-        $self->__validate_object($model, $data);
+        $self->_validate_object($model, $data);
     }; if ($@) {
-        warn "DatabaseInsertFailed - " .$@->{message};
+        throw $@->message;
     }
 
     my $sql = $self->_mk_query_insert($data);
@@ -382,15 +472,30 @@ sub insert {
 }
 
 sub update {
-    my ($self, $model, $data) = @_;
+    my ($self, $model_type, $criteria, $data, $cb) = @_;
+
+    my $model = $self->_load_model($model_type);
+    my $sql   = $self->_mk_query_update($model, $criteria, $data);
+    $criteria = _clean_criteria($model, $criteria);
+
+    eval {
+        $model->validate($criteria);
+        $model->validate($data);
+
+    }; if ($@) {
+        throw $@->message;
+    }
+
+    $self->_exec_query($sql, undef, $cb);
 }
 
 sub delete {
     my ($self, $model, $data) = @_;
+
+    throw "Not implemented yet";
 }
 
-sub create_filter
-{
+sub create_filter {
     my ($self, $filter) = @_;
 
     if( ref($filter) ne 'HASH' ) {
@@ -500,12 +605,11 @@ sub create_filter_from_scalar {
     $conditional //= '=';
     $field = $parent_field if ( $field =~ /^\$/ );
 
-    if ( $value =~ m/[^\d]/ )
-    {
-        return $field . $conditional . $value;
+    if ( $value =~ m/[^\d]/ ) {
+        return $field . $conditional . "'$value'";
     }
 
-    return $field . $conditional . $value;
+    return $field . $conditional . "'$value'";
 }
 
 1;

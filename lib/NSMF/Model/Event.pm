@@ -5,7 +5,7 @@ use 5.010;
 
 use base qw(NSMF::Model::Object);
 
-__PACKAGE__->properties({
+__PACKAGE__->set_properties({
     id             => ['int'],
     node_id        => ['int'],
     net_src_ip     => ['ip'],

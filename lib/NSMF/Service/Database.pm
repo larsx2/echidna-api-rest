@@ -12,7 +12,7 @@ sub new {
     my ($class, $handler, $settings) = @_;
     
     my $driver_package = __PACKAGE__ .'::'. uc $handler;
-    say $driver_package;
+
     croak "Database driver not supported" 
         unless /$driver_package/i ~~ [__PACKAGE__->drivers];
         #unless $handler ~~ ['dbi', 'cassandra', 'mongodb'];
@@ -23,14 +23,6 @@ sub new {
     }
 
     return $driver_path->new($settings);
-}
-
-sub _dbi_driver {
-    my ($driver) = @_;
-    my @drivers = qw(mysql sqlite pgsql);
-
-    croak "DBI Driver not supported" 
-        unless $driver ~~ @drivers;
 }
 
 1;

@@ -22,7 +22,11 @@ ok ($sess->id ~~ 1, 'Session should have get/set methods');
 ok ($evnt->id == 2, 'Event should have get/set methods');
 
 ok( ref $sess->metadata eq 'HASH', 'Should return metadata');
-ok( ref $sess->properties eq 'ARRAY', 'Should return properties');;
+ok( ref $sess->attributes eq 'ARRAY', 'Should return attributes');;
 ok( ref $sess->required_properties eq 'ARRAY', 'Should return required properties');;
+
+
+my $session = NSMF::Model::Session->new({ net_dst_port => 'asd' });
+say Dumper $session;
 #my $sess2 = NSMF::Model->new('session');
 #my $sess3 = NSMF::Model->load(session => $id);

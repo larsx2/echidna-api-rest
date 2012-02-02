@@ -12,11 +12,12 @@ use NSMF::Model::Session;
 use_ok 'NSMF::Service::Database';
 
 my $settings = {
-   driver => 'mysql',
-   user   => 'nsmf',
-   database => 'nsmf',
-   password => 'passw0rd.',
-   pool_size => 10,
+   driver    => 'mysql',
+   user      => 'nsmf',
+   database  => 'nsmf',
+   password  => 'passw0rd.',
+   pool_size => 1,
+   debug     => 1,
 };
 
 my $db = NSMF::Service::Database->new(dbi => $settings);
@@ -35,8 +36,6 @@ my $session = NSMF::Model::Session->new({
         net_dst_total_bytes   => '10',
         net_src_total_packets => '1',
         net_dst_total_packets => '2',
-
-# optional
         timestamp     => '121231212',
         time_duration => '1',
         net_version   => '4',
@@ -48,10 +47,17 @@ my $session = NSMF::Model::Session->new({
         meta          => '',
 });
 
+
 my $cv = AE::cv;
-$db->insert(session => $session, sub {
-    my $status = shift;
-    say $status;
+
+#$db->insert(session => $session, sub {
+#    say "Session Inserted";
+#});
+
+
+$db->update(session => { id => 101010101 }, { data_length => 11, asd => "asdfa" }, sub {
+    say "Update Done";
     $cv->send;
 });
+
 $cv->recv;

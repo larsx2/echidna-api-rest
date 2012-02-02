@@ -10,6 +10,6 @@ use lib join '/', File::Spec->splitdir(dirname(__FILE__)), '..', 'lib';
 
 use Mojolicious::Commands;
 
-$ENV{MOJO_APP} = 'NSMF::Server::Web';
+$ENV{MOJO_APP} = 'NSMF::Web::Server';
 
 Mojolicious::Commands->start;

@@ -3,39 +3,60 @@ package NSMF::Model::Object;
 use strict;
 use 5.010;
 
-use Carp;
 use base qw(Class::Accessor);
+use NSMF::Common::Error;
+use Data::Dumper;
 
-my $ATTR     = {};
-my $REQUIRED = [];
+sub new {
+    my ($class, $args) = @_;
 
-#sub new { bless {}, shift }
+    my $criteria = {};
+    for my $key (keys %$args) {
+        $criteria->{$key} = $args->{$key} 
+            if $key ~~ $class->attributes;
+    }
 
-sub properties {
-    my ($class, $properties) = @_; 
+    eval {
+        $class->validate($criteria);
+    }; if ($@) {
+        throw $@->message;
+    }
 
-    if (ref $properties eq 'HASH') {
-        $class->mk_accessors(keys %$properties);
-
-        $ATTR      = $properties;
-        @$REQUIRED = grep { 
-                      $_ if ref $properties->{$_} 
-                  } keys %$properties;
-    } 
-    else {
-        my @properties = sort keys %{$ATTR};
-        return \@properties;
-    }   
+    $class->SUPER::new($args);
 }
 
-sub metadata { $ATTR }
-sub required_properties { $REQUIRED }
+sub set_properties {
+    my ($class, $props) = @_;
+
+    {    
+        no strict 'refs';
+        *{"${class}::properties"} = sub { $props };
+    }   
+
+    $class->mk_accessors(keys %$props);
+}
+
+sub required_properties {
+    my $class = shift;
+
+    my @required = grep { 
+        $_ if ref $class->properties->{$_} 
+    } keys %{ $class->properties };
+
+    \@required;
+}
+
+sub metadata { shift->properties }
+sub attributes { 
+    my @keys = keys %{ shift->properties };
+    \@keys;
+}
 
 sub set {
     my ($self, $method, $arg) = @_;
     
-    if (defined $method and exists $ATTR->{$method}) {
-        my $type = $ATTR->{$method};
+    if (defined $method and exists $self->properties->{$method}) {
+        my $type = $self->properties->{$method};
         $type = shift @$type if ref $type eq 'ARRAY';
 
         eval {
@@ -43,13 +64,13 @@ sub set {
         }; 
         
         if ($@) {
-            croak 'TypeError - ' .$@->{message};
+            throw 'TypeError', $@->message;
         } else {
             $self->SUPER::set($method, $arg);
         }
     } 
     else {
-        carp "Unknown $method called on " .ref $self. " object";
+        warn "Unknown $method called on " .ref $self. " object";
     }
 }
 
@@ -62,15 +83,19 @@ sub validate_type {
             #    unless $value ~~ /\A\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z/;
         }
         when(/int/) { 
-            croak { message => "Integer type expected on '$key' accessor" }
+            throw 'ValidationError', "Integer type expected on '$key' accessor"
                 unless $value ~~ /\A\d+\Z/;
         }   
+        when(/varchar/) {
+            throw 'ValidationError', "Varchar type expected on '$key' accessor"
+                unless $value ~~ /[a-z0-1.,-_ ]+/i;
+        }
         when(/text/) {
-            croak { message => "Text type expected on '$key' accessor" }
+            throw 'ValidationError', "Text type expected on '$key' accessor"
                 unless $value ~~ /[a-z0-1.,-_ ]+/i;
         }   
         when(/datetime/) {
-            croak { message => "Integer type expected on '$key' accessor" }
+            throw 'ValidationError', "Datetime type expected on '$key' accessor"
                 unless $value ~~ /\A\d{4}\-\d{2}\-\d{2} \d{2}\:\d{2}\:\d{2}\Z/;
         }   
     }   
@@ -78,6 +103,28 @@ sub validate_type {
     return 1;
 }
 
+sub validate {
+    my ($self, $criteria) = @_;
+
+    return unless ref $criteria eq 'HASH';
+
+    my $props = $self->properties;
+
+    while (my ($key, $value) = each %$criteria) {
+
+        my $type = (ref $props->{$key}) 
+                 ? $props->{$key}->[0] 
+                 : $props->{$key};
+
+        eval {
+            $self->validate_type($type, $key, $value);
+        }; if ($@) {
+            throw $@->error, $@->message;
+        }
+    }
+
+    1;
+}
 
 1;
 

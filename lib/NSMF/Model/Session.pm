@@ -5,7 +5,7 @@ use 5.010;
 
 use base qw(NSMF::Model::Object);
 
-__PACKAGE__->properties({
+__PACKAGE__->set_properties({
     # required
     id                    => ['int'],
     node_id               => ['int'],
@@ -28,9 +28,14 @@ __PACKAGE__->properties({
     net_src_flags => 'int',
     net_dst_flags => 'int',
     data_filename => 'text',
-    data_offset   => 'int',
-    data_length   => 'int',
+    data_offset   => 'any',
+    data_length   => 'any',
     meta          => 'any',
 });
+
+sub process {
+    my ($self) = @_;
+
+}
 
 1;

@@ -3,7 +3,9 @@ package NSMF::Model::Node;
 use strict;
 use 5.010;
 
-__PACKAGE__->properties({
+use base qw(NSMF::Model::Object);
+
+__PACKAGE__->set_properties({
     id          => ['int'],
     name        => ['text'],
     type        => ['text'],
